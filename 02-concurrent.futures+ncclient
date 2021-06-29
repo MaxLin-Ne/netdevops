@@ -1,0 +1,132 @@
+#!/usr/bin/env python
+#coding: utf-8
+
+import time
+import sys
+import os
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from openpyxl import Workbook
+from openpyxl import load_workbook
+import xmltodict
+from ncclient import manager
+from ncclient import operations
+from ncclient.transport.errors import SSHError
+from ncclient.transport.errors import AuthenticationError
+from netmiko.ssh_exception import NetMikoTimeoutException
+from netmiko.ssh_exception import AuthenticationException
+from paramiko.ssh_exception import SSHException
+
+
+devinfo_FILTER = '''
+    <system xmlns="http://www.huawei.com/netconf/vrp" content-version="1.0" format-version="1.0">
+      <systemInfo>
+        <sysName></sysName>
+        <productName></productName>
+        <productVer></productVer>
+        <patchVer></patchVer>
+        <esn></esn>
+      </systemInfo>
+    </system>
+'''
+
+class ReadDeviceInfo(object):
+    
+    def __init__(self):   
+        self.devices_filename = ('/home/netops/linshaoyue/linsy_venv/01-jdd-devnet/01-jdd-netpy/info02.xlsx')
+        self.wb1 = load_workbook(self.devices_filename)
+        self.ws1 = self.wb1.get_sheet_by_name("device list")
+
+    def read_device_excel(self):
+        ip_list = []
+        for cow_num in range(2,self.ws1.max_row+1):
+            ipaddr = self.ws1["b"+str(cow_num)].value
+            ip_list.append(ipaddr) 
+        return ip_list
+
+    def write_to_excel(self,device_ip,nc_list):
+        new_cow_num = devices_list.index(device_ip) + 2
+        print("--------writing to excel------------{}: {}".format(new_cow_num,device_ip))
+        
+        self.ws1["d"+str(new_cow_num)] = nc_list[0]["sysName"]
+        self.ws1["e"+str(new_cow_num)] = nc_list[0]["productName"]
+        self.ws1["f"+str(new_cow_num)] = nc_list[0]["productVer"]
+        self.ws1["g"+str(new_cow_num)] = nc_list[0]["patchVer"]
+        self.ws1["h"+str(new_cow_num)] = nc_list[0]["esn"]
+
+# Fill the device information and establish a NETCONF session
+def huawei_connect(host, port, user, password):
+    return manager.connect(host=host,
+                            port=port,
+                            username=user,
+                            password=password,
+                            hostkey_verify = False,
+                            device_params={'name': "huawei"},
+                            allow_agent = False,
+                            look_for_keys = False)
+
+def hw_nc_get(host, port, user, password):
+    with huawei_connect(host, port=port, user=user, password=password) as m:
+        return m.get(("subtree", devinfo_FILTER))
+
+def write_issue_device(issue_device):
+    now = datetime.now()
+    date = "{}-{}-{}".format(now.year, now.month, now.day)
+    time_now = "{}-{}".format(now.hour,now.minute)
+    # config_path = '/home/netops/linsy_env/' + "issue_" + date
+    config_path = '/home/netops/linshaoyue/linsy_venv/01-jdd-devnet/03-jdd-issue/' + "issue_" + date
+    verify_path = os.path.exists(config_path)
+    if not verify_path:
+        os.makedirs(config_path)
+
+    config_filename = config_path+"/"+'issue_'+date+"_" + time_now
+    print ('---- Writing issue: ', config_filename)
+    with open (config_filename, "w", encoding='utf-8') as issue_facts:
+        issue_facts.write('\n'.join(issue_device))
+
+
+def main(x):
+    try:
+        print("---get information of device: {}".format(x))
+        nc_res = hw_nc_get(x,22,"user","pass")
+        xml_rep = nc_res.data_xml
+        xml_dict = xmltodict.parse(xml_rep)
+        nc_list = []
+        for k,y in xml_dict['data']['system']['systemInfo'].items():
+            nc_dict = (dict((x,y) for x,y in xml_dict['data']['system']['systemInfo'].items()))
+            nc_list.append(nc_dict)
+        #nc获取信息插入excel      nc_list = [{'stackStatus': 'Stack'}]
+        devices.write_to_excel(x,nc_list)
+        
+    except (AuthenticationException,AuthenticationError):
+        issue_message = (x + ': 认证错误 ')
+        issue_device.append(issue_message)
+    except NetMikoTimeoutException:
+        issue_message = (x + ': 网络不可达 ')
+        issue_device.append(issue_message)
+    except (SSHException,SSHError):
+        issue_message = (x +': SSH端口异常 ')
+        issue_device.append(issue_message)
+    except (EOFError):
+        issue_message = (x + ": 用户输入文件末尾标志EOF ")
+        issue_device.append(issue_message)
+    except Exception as unknown_error:
+        issue_message = (x +': 发生未知错误: ')
+        issue_device.append(issue_message+(str(unknown_error)))                   
+    finally:
+        write_issue_device(issue_device)                  #异常处理信息写入文件
+
+#====================================================
+#ncclient抓取华为设备信息，并存入excel中
+#====================================================
+
+if __name__ == '__main__':
+    starting_time = time.time()
+    issue_device = []
+    devices = ReadDeviceInfo()
+    devices_list = devices.read_device_excel()
+    with ThreadPoolExecutor(max_workers=200) as executor:
+        results = executor.map(main,devices_list)
+    devices.wb1.save('info02.xlsx')
+    print ('\n---- End get config threading, elapsed time=', time.time() - starting_time)
